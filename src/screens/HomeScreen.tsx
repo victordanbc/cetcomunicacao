@@ -6,6 +6,7 @@ import {
   Alert,
   Image,
   type ImageStyle,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -13,6 +14,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TouchableOpacity,
   useWindowDimensions,
   View
 } from "react-native";
@@ -31,6 +33,8 @@ const D = {
   borderLight: "#d8d8d8",
   red: "#d32f2f",
   green: "#2e7d32",
+  /** Destaque de devolução (total no resumo, barra na atividade, selo DEVOLUÇÃO, etc.) */
+  devolucao: "#219D01",
   white: "#ffffff"
 };
 
@@ -165,51 +169,114 @@ type ActivityRow = {
   serial: string;
   /** Operador CET da movimentação (entregou na retirada ou recebeu na devolução) */
   operadorCet: string;
-  /** Operador CET a quem o equipamento está vinculado no patrimônio */
+  /** Operador CET a quem o equipamento está vinculado no patrimônio (relatório / exportação) */
   operadorCetVinculo: string;
   /** Pessoa responsável (quem retira ou devolve na operação) */
   pessoaResponsavel: string;
   type: "retirada" | "devolucao";
   time: string;
+  /** Se false, a linha não aparece em Atividade Recente, mas segue no histórico e nos relatórios. */
+  visivelEmAtividadeRecente?: boolean;
 };
 
-/** `activityRows` está do mais novo para o mais antigo. */
-function ultimaMovimentacaoDoSerial(serial: string, rows: ActivityRow[]): ActivityRow | undefined {
-  return rows.find((r) => r.serial === serial);
+function normalizeSerialRef(serial: string): string {
+  return serial.trim().replace(/\s+/g, " ").toUpperCase();
 }
 
-const MOCK_ACTIVITY: ActivityRow[] = [
-  {
-    id: "1",
-    product: "Smartphone",
-    serial: "NS: CET-SMART-01",
-    operadorCet: "Ricardo Mendes",
-    operadorCetVinculo: "Juliana Rocha",
-    pessoaResponsavel: "João Silva",
-    type: "devolucao",
-    time: "14:22 Hoje"
-  },
-  {
-    id: "2",
-    product: "Impressora de mão",
-    serial: "NS: CET-IMPMAO-01",
-    operadorCet: "Fernanda Costa",
-    operadorCetVinculo: "Marcos Antunes",
-    pessoaResponsavel: "Maria Oliveira",
-    type: "retirada",
-    time: "11:05 Hoje"
-  },
-  {
-    id: "3",
-    product: "Smartphone",
-    serial: "NS: CET-SMART-01",
-    operadorCet: "Pedro Albuquerque",
-    operadorCetVinculo: "Juliana Rocha",
-    pessoaResponsavel: "Carlos Eduardo Santos",
-    type: "retirada",
-    time: "09:40 Hoje"
+/** Minutos desde meia-noite para rótulos "HH:mm Hoje" (mock / painel). */
+function minutosHojeNaEtiqueta(time: string): number | null {
+  const m = String(time).trim().match(/^(\d{1,2}):(\d{2})\s+Hoje\b/i);
+  if (!m) return null;
+  const h = Number.parseInt(m[1], 10);
+  const min = Number.parseInt(m[2], 10);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+/**
+ * Última movimentação daquele serial no histórico completo.
+ * Não usa só `find`: o array é ordenado por tempo global (prepend), e outras linhas no meio
+ * podem fazer a primeira ocorrência do serial não ser a mais recente.
+ */
+function ultimaMovimentacaoDoSerial(serial: string, rows: ActivityRow[]): ActivityRow | undefined {
+  const key = normalizeSerialRef(serial);
+  if (!key || key === "—" || key === "NS: —") return undefined;
+
+  const matches = rows
+    .map((r, index) => ({ r, index }))
+    .filter(({ r }) => normalizeSerialRef(r.serial) === key);
+  if (matches.length === 0) return undefined;
+  if (matches.length === 1) return matches[0].r;
+
+  matches.sort((a, b) => {
+    const ma = minutosHojeNaEtiqueta(a.r.time);
+    const mb = minutosHojeNaEtiqueta(b.r.time);
+    if (ma != null && mb != null && ma !== mb) return mb - ma;
+    if (ma != null && mb == null) return -1;
+    if (ma == null && mb != null) return 1;
+    return a.index - b.index;
+  });
+  return matches[0].r;
+}
+
+/** Retirada ainda vigente: é a movimentação mais recente daquele serial e é retirada. */
+function retiradaEmAberto(row: ActivityRow, rows: ActivityRow[]): boolean {
+  if (row.type !== "retirada") return false;
+  const ult = ultimaMovimentacaoDoSerial(row.serial, rows);
+  return ult?.id === row.id;
+}
+
+function findProductInfoBySerial(serial: string): ProductInfo | null {
+  for (const p of Object.values(PRODUCT_BARCODE_REGISTRY)) {
+    if (p.serial === serial) return { ...p };
   }
-];
+  return null;
+}
+
+/** Horário local no mesmo formato usado nas movimentações (ex.: "14:32 Hoje"). */
+function formatHoraHojePt(d: Date): string {
+  const h = d.getHours().toString().padStart(2, "0");
+  const m = d.getMinutes().toString().padStart(2, "0");
+  return `${h}:${m} Hoje`;
+}
+
+/** Ordem: mais recente primeiro. Horários calculados a partir do relógio ao carregar o app. */
+function buildMockActivityRows(): ActivityRow[] {
+  const now = Date.now();
+  const t = (msAgo: number) => formatHoraHojePt(new Date(now - msAgo));
+  return [
+    {
+      id: "3",
+      product: "Smartphone",
+      serial: "NS: CET-SMART-01",
+      operadorCet: "Lucas Ferreira",
+      operadorCetVinculo: "Juliana Rocha",
+      pessoaResponsavel: "Admin",
+      type: "devolucao",
+      time: t(25 * 60 * 1000)
+    },
+    {
+      id: "1",
+      product: "Smartphone",
+      serial: "NS: CET-SMART-01",
+      operadorCet: "Ricardo Mendes",
+      operadorCetVinculo: "Juliana Rocha",
+      pessoaResponsavel: "João Silva",
+      type: "retirada",
+      time: t(3 * 60 * 60 * 1000)
+    },
+    {
+      id: "2",
+      product: "Impressora de mão",
+      serial: "NS: CET-IMPMAO-01",
+      operadorCet: "Fernanda Costa",
+      operadorCetVinculo: "Marcos Antunes",
+      pessoaResponsavel: "Maria Oliveira",
+      type: "retirada",
+      time: t(45 * 60 * 1000)
+    }
+  ];
+}
 
 /** Separador compatível com Excel em português (Brasil), que usa “;” na lista. */
 const CSV_SEP_BR = ";";
@@ -449,6 +516,9 @@ function Sidebar({
   );
 }
 
+/** Teste: devolução não exige crachá no passo 2 — usa o usuário logado como operador CET que recebe. Voltar para `false` para exigir leitura. */
+const DEVOLUCAO_CRACHA_OPCIONAL_TESTE = true;
+
 export function HomeScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const { width } = useWindowDimensions();
@@ -461,13 +531,30 @@ export function HomeScreen() {
   const [activityOperadorFilter, setActivityOperadorFilter] = useState<string>("todos");
   const [activityFilterMenuOpen, setActivityFilterMenuOpen] = useState(false);
   const activityFilterAnchorRef = useRef<View>(null);
+  const [devolucaoModalVisible, setDevolucaoModalVisible] = useState(false);
+  /** Linha de retirada em aberto ao abrir o modal pelo botão Devolver (não usar productResolved no painel). */
+  const [devolucaoModalRetiradaRow, setDevolucaoModalRetiradaRow] = useState<ActivityRow | null>(null);
+  const [retiradaModalVisible, setRetiradaModalVisible] = useState(false);
   const [productBarcode, setProductBarcode] = useState("");
   const [productResolved, setProductResolved] = useState<ProductInfo | null>(null);
   const [productScanHint, setProductScanHint] = useState<string | null>(null);
   const [operatorBarcode, setOperatorBarcode] = useState("");
   const [operadorNome, setOperadorNome] = useState<string | null>(null);
   const [operatorScanHint, setOperatorScanHint] = useState<string | null>(null);
-  const [activityRows, setActivityRows] = useState<ActivityRow[]>(() => [...MOCK_ACTIVITY]);
+  const [activityRows, setActivityRows] = useState<ActivityRow[]>(() => [...buildMockActivityRows()]);
+
+  const activityRowsRef = useRef(activityRows);
+  const operadorNomeRef = useRef(operadorNome);
+  const productResolvedRef = useRef(productResolved);
+  useEffect(() => {
+    activityRowsRef.current = activityRows;
+  }, [activityRows]);
+  useEffect(() => {
+    operadorNomeRef.current = operadorNome;
+  }, [operadorNome]);
+  useEffect(() => {
+    productResolvedRef.current = productResolved;
+  }, [productResolved]);
 
   const confirmProductBarcode = useCallback(() => {
     const raw = productBarcode.trim();
@@ -506,17 +593,22 @@ export function HomeScreen() {
     setOperadorNome(name);
   }, [operatorBarcode]);
 
+  const linhasAtividadeRecente = useMemo(
+    () => activityRows.filter((r) => r.visivelEmAtividadeRecente !== false),
+    [activityRows]
+  );
+
   const operadoresAtividadeOpcoes = useMemo(() => {
     const s = new Set<string>();
-    activityRows.forEach((r) => {
+    linhasAtividadeRecente.forEach((r) => {
       s.add(r.operadorCet);
       s.add(r.operadorCetVinculo);
     });
     return Array.from(s).sort((a, b) => a.localeCompare(b, "pt-BR"));
-  }, [activityRows]);
+  }, [linhasAtividadeRecente]);
 
   const atividadeFiltrada = useMemo(() => {
-    return activityRows.filter((row) => {
+    return linhasAtividadeRecente.filter((row) => {
       if (activityStatusFilter !== "todos" && row.type !== activityStatusFilter) return false;
       if (activityOperadorFilter !== "todos") {
         const op = activityOperadorFilter;
@@ -524,7 +616,18 @@ export function HomeScreen() {
       }
       return true;
     });
-  }, [activityRows, activityStatusFilter, activityOperadorFilter]);
+  }, [linhasAtividadeRecente, activityStatusFilter, activityOperadorFilter]);
+
+  const resumoDiario = useMemo(() => {
+    const hoje = activityRows.filter((r) => /\bHoje\b/i.test(r.time));
+    let retiradas = 0;
+    let devolucoes = 0;
+    for (const r of hoje) {
+      if (r.type === "retirada") retiradas += 1;
+      else devolucoes += 1;
+    }
+    return { retiradas, devolucoes };
+  }, [activityRows]);
 
   const ultimaDoProdutoAtual = useMemo(() => {
     if (!productResolved?.serial) return undefined;
@@ -534,72 +637,178 @@ export function HomeScreen() {
   const equipamentoRetirado =
     Boolean(productResolved) && ultimaDoProdutoAtual?.type === "retirada";
 
-  const registrarMovimentacao = useCallback(
-    (tipo: "retirada" | "devolucao") => {
-      if (!productResolved) {
-        Alert.alert("Produto", "Escaneie e confirme o produto antes de registrar.");
-        return;
-      }
-      if (!operadorNome) {
-        Alert.alert("Operador", "Escaneie e confirme o crachá do operador CET.");
-        return;
-      }
-
-      const info = productResolved;
-      const opNome = operadorNome;
-      const pessoa = getPessoaResponsavelLogada();
-
-      const ult = ultimaMovimentacaoDoSerial(info.serial, activityRows);
-      if (tipo === "retirada") {
-        if (ult?.type === "retirada") {
-          Alert.alert(
-            "Retirada",
-            "Este equipamento já está retirado. Confirme a devolução na área de atividade (botão ao lado dos filtros)."
-          );
-          return;
-        }
-      } else {
-        if (!ult || ult.type !== "retirada") {
-          Alert.alert(
-            "Devolução",
-            "Este equipamento não consta como retirado. Confirme o produto ou registre uma retirada primeiro."
-          );
-          return;
-        }
-      }
-
-      /** Patrimônio do cadastro do item; se não houver, assume o mesmo operador do crachá. */
-      const operadorCetVinculo = info.operadorPatrimonio ?? opNome;
-
-      const now = new Date();
-      const time = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")} Hoje`;
-
-      const newRow: ActivityRow = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-        product: info.name,
-        serial: info.serial,
-        operadorCet: opNome,
-        operadorCetVinculo,
-        pessoaResponsavel: pessoa,
-        type: tipo,
-        time
-      };
-
-      setActivityRows((prev) => [newRow, ...prev]);
+  const aplicarRetiradaNoHistorico = useCallback((info: ProductInfo, opNome: string): boolean => {
+    const ult = ultimaMovimentacaoDoSerial(info.serial, activityRowsRef.current);
+    if (ult?.type === "retirada") {
       Alert.alert(
-        tipo === "retirada" ? "Retirada registrada" : "Devolução registrada",
-        `${info.name} · ${opNome} · ${pessoa}`
+        "Retirada",
+        "Este equipamento já está retirado. Confirme a devolução na área de atividade (botão Devolver)."
       );
+      return false;
+    }
 
-      setProductBarcode("");
+    const pessoa = getPessoaResponsavelLogada();
+    const operadorCetVinculo = info.operadorPatrimonio ?? opNome;
+    const now = new Date();
+    const time = formatHoraHojePt(now);
+
+    const newRow: ActivityRow = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      product: info.name,
+      serial: info.serial,
+      operadorCet: opNome,
+      operadorCetVinculo,
+      pessoaResponsavel: pessoa,
+      type: "retirada",
+      time,
+      visivelEmAtividadeRecente: true
+    };
+
+    setActivityRows((prev) => [newRow, ...prev]);
+    Alert.alert("Retirada registrada", `${info.name} · ${opNome} · ${pessoa}`);
+    return true;
+  }, []);
+
+  const abrirModalRetirada = useCallback(() => {
+    if (!productResolved) {
+      Alert.alert("Produto", "Escaneie e confirme o produto antes de registrar.");
+      return;
+    }
+    if (!operadorNome) {
+      Alert.alert("Operador", "Escaneie e confirme o crachá do operador CET.");
+      return;
+    }
+
+    const ult = ultimaMovimentacaoDoSerial(productResolved.serial, activityRows);
+    if (ult?.type === "retirada") {
+      Alert.alert(
+        "Retirada",
+        "Este equipamento já está retirado. Confirme a devolução na área de atividade (botão Devolver)."
+      );
+      return;
+    }
+
+    setRetiradaModalVisible(true);
+  }, [productResolved, operadorNome, activityRows]);
+
+  const fecharModalRetirada = useCallback(() => {
+    setRetiradaModalVisible(false);
+  }, []);
+
+  const confirmarRetiradaNoModal = useCallback(() => {
+    const info = productResolvedRef.current;
+    const opNome = operadorNomeRef.current;
+    if (!info || !opNome) {
+      fecharModalRetirada();
+      return;
+    }
+    if (!aplicarRetiradaNoHistorico(info, opNome)) {
+      fecharModalRetirada();
+      return;
+    }
+    fecharModalRetirada();
+    setProductBarcode("");
+    setProductResolved(null);
+    setProductScanHint(null);
+    setOperatorBarcode("");
+    setOperadorNome(null);
+    setOperatorScanHint(null);
+  }, [aplicarRetiradaNoHistorico, fecharModalRetirada]);
+
+  const fecharModalDevolucao = useCallback(() => {
+    setDevolucaoModalVisible(false);
+    setDevolucaoModalRetiradaRow(null);
+  }, []);
+
+  const aplicarDevolucaoNoHistorico = useCallback((row: ActivityRow, opNome: string): boolean => {
+    if (!retiradaEmAberto(row, activityRowsRef.current)) {
+      Alert.alert(
+        "Devolução",
+        "Esta retirada não está mais em aberto ou o equipamento já foi devolvido."
+      );
+      return false;
+    }
+    const pessoa = getPessoaResponsavelLogada();
+    const info =
+      findProductInfoBySerial(row.serial) ?? {
+        name: row.product,
+        serial: row.serial,
+        category: "—",
+        shelf: "—",
+        imageUri: DEFAULT_PRODUCT_IMAGE
+      };
+    const operadorCetVinculo = info.operadorPatrimonio ?? opNome;
+    const now = new Date();
+    const time = formatHoraHojePt(now);
+
+    const newRow: ActivityRow = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      product: info.name,
+      serial: info.serial,
+      operadorCet: opNome,
+      operadorCetVinculo,
+      pessoaResponsavel: pessoa,
+      type: "devolucao",
+      time,
+      visivelEmAtividadeRecente: false
+    };
+
+    const retiradaRowId = row.id;
+    setActivityRows((prev) => {
+      const atualizado = prev.map((r) =>
+        r.id === retiradaRowId ? { ...r, visivelEmAtividadeRecente: false as const } : r
+      );
+      return [newRow, ...atualizado];
+    });
+
+    Alert.alert("Devolução registrada", `${info.name} · ${opNome} · ${pessoa}`);
+    return true;
+  }, []);
+
+  const iniciarDevolucaoDaAtividade = useCallback(
+    (row: ActivityRow) => {
+      if (!retiradaEmAberto(row, activityRows)) return;
       setProductResolved(null);
+      setProductBarcode("");
       setProductScanHint(null);
-      setOperatorBarcode("");
       setOperadorNome(null);
+      setOperatorBarcode("");
       setOperatorScanHint(null);
+      setDevolucaoModalRetiradaRow(row);
+      setDevolucaoModalVisible(true);
     },
-    [activityRows, operadorNome, productResolved]
+    [activityRows]
   );
+
+  const confirmarDevolucaoNoModal = useCallback(() => {
+    const row = devolucaoModalRetiradaRow;
+    if (!row) {
+      fecharModalDevolucao();
+      return;
+    }
+
+    let opNome = operadorNomeRef.current;
+    if (!opNome) {
+      if (DEVOLUCAO_CRACHA_OPCIONAL_TESTE) {
+        opNome = USUARIO_LOGADO_MOCK.nome;
+      } else {
+        Alert.alert(
+          "Operador",
+          "Escaneie e confirme o crachá do operador CET que recebe o equipamento (passo 2) antes de confirmar."
+        );
+        return;
+      }
+    }
+
+    if (!aplicarDevolucaoNoHistorico(row, opNome)) {
+      fecharModalDevolucao();
+      return;
+    }
+    fecharModalDevolucao();
+    setOperatorBarcode("");
+    setOperadorNome(null);
+    setOperatorScanHint(null);
+  }, [devolucaoModalRetiradaRow, fecharModalDevolucao, aplicarDevolucaoNoHistorico]);
 
   const closeActivityFilterMenu = useCallback(() => setActivityFilterMenuOpen(false), []);
 
@@ -647,12 +856,6 @@ export function HomeScreen() {
         <View>
           <Text style={styles.kicker}>MÓDULO OPERACIONAL</Text>
           <Text style={styles.mainTitle}>Controle de Equipamentos</Text>
-        </View>
-        <View style={styles.mainHeaderRight}>
-          <View style={styles.onlinePill}>
-            <View style={styles.onlineDot} />
-            <Text style={styles.onlineText}>Sistema Online</Text>
-          </View>
         </View>
       </View>
 
@@ -744,29 +947,35 @@ export function HomeScreen() {
         </Text>
       </View>
 
-      {!equipamentoRetirado ? (
+      <View style={styles.withdrawSection}>
         <View style={styles.actionRow}>
           <Pressable
-            onPress={() => registrarMovimentacao("retirada")}
-            style={({ pressed }) => [styles.withdrawBtn, pressed && { opacity: 0.92 }]}
+            disabled={equipamentoRetirado}
+            onPress={abrirModalRetirada}
+            style={({ pressed }) => [
+              styles.withdrawBtn,
+              equipamentoRetirado && styles.withdrawBtnDisabled,
+              pressed && !equipamentoRetirado && { opacity: 0.92 }
+            ]}
           >
             <IconBox name="package-up" color={D.red} bg="rgba(211,47,47,0.12)" />
             <Text style={styles.actionBtnTitle}>Retirada</Text>
             <Text style={styles.actionBtnSub}>(RETIRAR)</Text>
           </Pressable>
         </View>
-      ) : (
-        <View style={styles.actionRowHint}>
-          <MaterialCommunityIcons name="information-outline" size={20} color="#666" />
-          <Text style={styles.actionRowHintText}>
-            Equipamento retirado — a devolução é confirmada na área &quot;Atividade Recente&quot;, ao lado dos filtros.
-          </Text>
-        </View>
-      )}
+        {equipamentoRetirado ? (
+          <View style={[styles.actionRowHint, styles.actionRowHintBelowWithdraw]}>
+            <MaterialCommunityIcons name="information-outline" size={20} color="#666" />
+            <Text style={styles.actionRowHintText}>
+              Este equipamento já está em retirada. A devolução é confirmada em &quot;Atividade Recente&quot;, ao lado dos filtros.
+            </Text>
+          </View>
+        ) : null}
+      </View>
 
       {!wide && (
         <>
-          <StatsBlock />
+          <StatsBlock resumo={resumoDiario} />
           <ReportBlock onBaixar={baixarRelatorio} />
           <LiveInventoryCard />
         </>
@@ -796,7 +1005,7 @@ export function HomeScreen() {
             {activityFilterMenuOpen ? (
               <View style={styles.activityFiltroPanel}>
                 <Text style={styles.activityFiltroSectionTitle}>Operador CET</Text>
-                <Text style={styles.activityFiltroSectionHint}>Quem entregou/recebeu ou titular do item no movimento</Text>
+                <Text style={styles.activityFiltroSectionHint}>Quem entregou ou recebeu na movimentação</Text>
                 <View style={styles.activityFiltroChipWrap}>
                   <Pressable
                     onPress={() => setActivityOperadorFilter("todos")}
@@ -881,27 +1090,6 @@ export function HomeScreen() {
           </View>
         </View>
 
-        {equipamentoRetirado && ultimaDoProdutoAtual ? (
-          <View style={styles.devolucaoBanner}>
-            <View style={styles.devolucaoBannerText}>
-              <Text style={styles.devolucaoBannerTitle}>Devolução</Text>
-              <Text style={styles.devolucaoBannerSub}>
-                Retirado por{" "}
-                <Text style={styles.devolucaoBannerEm}>{ultimaDoProdutoAtual.pessoaResponsavel}</Text>
-                {" · "}
-                {ultimaDoProdutoAtual.time}
-              </Text>
-            </View>
-            <Pressable
-              onPress={() => registrarMovimentacao("devolucao")}
-              style={({ pressed }) => [styles.devolucaoBannerBtn, pressed && { opacity: 0.9 }]}
-            >
-              <MaterialCommunityIcons name="package-down" size={20} color={D.black} />
-              <Text style={styles.devolucaoBannerBtnText}>Confirmar</Text>
-            </Pressable>
-          </View>
-        ) : null}
-
         <View style={styles.filterRow}>
           {(
             [
@@ -943,7 +1131,7 @@ export function HomeScreen() {
             <View
               style={[
                 styles.activityBar,
-                { backgroundColor: row.type === "devolucao" ? D.gold : D.red }
+                { backgroundColor: row.type === "devolucao" ? D.devolucao : D.red }
               ]}
             />
             <View style={styles.activityBody}>
@@ -951,32 +1139,26 @@ export function HomeScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.activityProduct}>{row.product}</Text>
                   <Text style={styles.activitySerial}>{row.serial}</Text>
-                  {row.operadorCetVinculo !== row.operadorCet ? (
-                    <Text style={styles.activityVinculoLine}>
-                      <Text style={styles.activityPeopleLabel}>Vínculo patrimonial do item: </Text>
-                      <Text style={styles.activityPeopleName}>{row.operadorCetVinculo}</Text>
-                    </Text>
-                  ) : null}
                   <View style={styles.activityPeople}>
                     {row.type === "retirada" ? (
                       <>
                         <Text style={styles.activityPeopleLine}>
-                          <Text style={styles.activityPeopleLabel}>Operador CET (entregou): </Text>
+                          <Text style={styles.activityPeopleLabel}>Operador CET: </Text>
                           <Text style={styles.activityPeopleName}>{row.operadorCet}</Text>
                         </Text>
                         <Text style={styles.activityPeopleLine}>
-                          <Text style={styles.activityPeopleLabel}>Pessoa responsável (retirou): </Text>
+                          <Text style={styles.activityPeopleLabel}>Quem retirou: </Text>
                           <Text style={styles.activityPeopleName}>{row.pessoaResponsavel}</Text>
                         </Text>
                       </>
                     ) : (
                       <>
                         <Text style={styles.activityPeopleLine}>
-                          <Text style={styles.activityPeopleLabel}>Operador CET (recebeu): </Text>
+                          <Text style={styles.activityPeopleLabel}>Operador CET: </Text>
                           <Text style={styles.activityPeopleName}>{row.operadorCet}</Text>
                         </Text>
                         <Text style={styles.activityPeopleLine}>
-                          <Text style={styles.activityPeopleLabel}>Pessoa responsável (devolveu): </Text>
+                          <Text style={styles.activityPeopleLabel}>Quem devolveu: </Text>
                           <Text style={styles.activityPeopleName}>{row.pessoaResponsavel}</Text>
                         </Text>
                       </>
@@ -1000,6 +1182,15 @@ export function HomeScreen() {
                     </Text>
                   </View>
                   <Text style={styles.activityTime}>{row.time}</Text>
+                  {retiradaEmAberto(row, activityRows) ? (
+                    <Pressable
+                      onPress={() => iniciarDevolucaoDaAtividade(row)}
+                      style={({ pressed }) => [styles.activityDevolverBtn, pressed && { opacity: 0.88 }]}
+                    >
+                      <MaterialCommunityIcons name="package-down" size={18} color={D.white} />
+                      <Text style={styles.activityDevolverBtnText}>Devolver</Text>
+                    </Pressable>
+                  ) : null}
                 </View>
               </View>
             </View>
@@ -1036,7 +1227,7 @@ export function HomeScreen() {
               ]}
               showsVerticalScrollIndicator={false}
             >
-              <StatsBlock />
+              <StatsBlock resumo={resumoDiario} />
               <ReportBlock onBaixar={baixarRelatorio} />
               <LiveInventoryCard />
             </ScrollView>
@@ -1058,33 +1249,163 @@ export function HomeScreen() {
           {mainBody}
         </ScrollView>
       )}
+
+      <Modal
+        visible={devolucaoModalVisible}
+        animationType="fade"
+        transparent
+        onRequestClose={fecharModalDevolucao}
+      >
+        <View style={styles.devolucaoModalWrap}>
+          <Pressable
+            style={styles.devolucaoModalBackdrop}
+            onPress={fecharModalDevolucao}
+            accessibilityLabel="Fechar"
+          />
+          <View
+            style={[
+              styles.devolucaoModalCard,
+              Platform.OS === "web" && ({ position: "relative", zIndex: 1000, isolation: "isolate" } as const)
+            ]}
+          >
+            <MaterialCommunityIcons
+              name="package-down"
+              size={44}
+              color={D.devolucao}
+              style={{ alignSelf: "center", marginBottom: 12 }}
+            />
+            <Text style={styles.devolucaoModalTitle}>Confirmar devolução?</Text>
+            {devolucaoModalRetiradaRow ? (
+              <Text style={styles.devolucaoModalProduct}>
+                {devolucaoModalRetiradaRow.product}
+                {"\n"}
+                <Text style={styles.devolucaoModalSerial}>{devolucaoModalRetiradaRow.serial}</Text>
+              </Text>
+            ) : null}
+            {devolucaoModalRetiradaRow ? (
+              <Text style={styles.devolucaoModalHint}>
+                Retirado por{" "}
+                <Text style={styles.devolucaoModalHintEm}>{getPessoaResponsavelLogada()}</Text>
+                {" · "}
+                {devolucaoModalRetiradaRow.time}
+              </Text>
+            ) : null}
+            <Text style={styles.devolucaoModalFoot}>
+              {DEVOLUCAO_CRACHA_OPCIONAL_TESTE
+                ? `Devolução em nome de ${getPessoaResponsavelLogada()}. Sem crachá confirmado no passo 2, o sistema usa o usuário logado como operador CET que recebe.`
+                : `Devolução registrada em nome de ${getPessoaResponsavelLogada()}. Confirme o crachá do operador CET que recebe o equipamento antes de finalizar.`}
+            </Text>
+            <View style={styles.devolucaoModalActions}>
+              <TouchableOpacity
+                onPress={fecharModalDevolucao}
+                activeOpacity={0.85}
+                style={styles.devolucaoModalBtnCancel}
+              >
+                <Text style={styles.devolucaoModalBtnCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={confirmarDevolucaoNoModal}
+                activeOpacity={0.9}
+                style={styles.devolucaoModalBtnOk}
+              >
+                <Text style={styles.devolucaoModalBtnOkText}>Confirmar devolução</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={retiradaModalVisible}
+        animationType="fade"
+        transparent
+        onRequestClose={fecharModalRetirada}
+      >
+        <View style={styles.devolucaoModalWrap}>
+          <Pressable
+            style={styles.devolucaoModalBackdrop}
+            onPress={fecharModalRetirada}
+            accessibilityLabel="Fechar"
+          />
+          <View
+            style={[
+              styles.devolucaoModalCard,
+              Platform.OS === "web" && ({ position: "relative", zIndex: 1000, isolation: "isolate" } as const)
+            ]}
+          >
+            <MaterialCommunityIcons
+              name="package-up"
+              size={44}
+              color={D.red}
+              style={{ alignSelf: "center", marginBottom: 12 }}
+            />
+            <Text style={styles.devolucaoModalTitle}>Confirmar retirada?</Text>
+            {productResolved ? (
+              <Text style={styles.devolucaoModalProduct}>
+                {productResolved.name}
+                {"\n"}
+                <Text style={styles.devolucaoModalSerial}>{productResolved.serial}</Text>
+              </Text>
+            ) : null}
+            {operadorNome ? (
+              <Text style={[styles.devolucaoModalHint, { marginBottom: 6 }]}>
+                Operador CET (entrega):{" "}
+                <Text style={styles.devolucaoModalHintEm}>{operadorNome}</Text>
+              </Text>
+            ) : null}
+            <Text style={[styles.devolucaoModalHint, { marginBottom: 12 }]}>
+              Quem retira:{" "}
+              <Text style={styles.devolucaoModalHintEm}>{getPessoaResponsavelLogada()}</Text>
+            </Text>
+            <Text style={styles.devolucaoModalFoot}>
+              Ao confirmar, a retirada será registrada no histórico e na atividade recente.
+            </Text>
+            <View style={styles.devolucaoModalActions}>
+              <TouchableOpacity
+                onPress={fecharModalRetirada}
+                activeOpacity={0.85}
+                style={styles.devolucaoModalBtnCancel}
+              >
+                <Text style={styles.devolucaoModalBtnCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={confirmarRetiradaNoModal}
+                activeOpacity={0.9}
+                style={styles.retiradaModalBtnConfirm}
+              >
+                <Text style={styles.retiradaModalBtnConfirmText}>Confirmar retirada</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
-function StatsBlock() {
+function StatsBlock({
+  resumo
+}: {
+  resumo: { retiradas: number; devolucoes: number };
+}) {
+  const { retiradas, devolucoes } = resumo;
+
   return (
     <View style={styles.statsCard}>
       <Text style={styles.statsCardTitle}>Resumo Diário</Text>
+      <Text style={styles.statsCardHint}>Movimentos com horário &quot;Hoje&quot; na lista</Text>
       <View style={styles.statRow}>
         <Text style={styles.statLabel}>Total de Retiradas</Text>
         <View style={styles.statValueRow}>
-          <Text style={[styles.statValue, { color: D.red }]}>42</Text>
+          <Text style={[styles.statValue, { color: D.red }]}>{retiradas}</Text>
           <MaterialCommunityIcons name="trending-up" size={22} color={D.red} />
         </View>
       </View>
-      <View style={styles.statRow}>
+      <View style={[styles.statRow, { marginBottom: 0 }]}>
         <Text style={styles.statLabel}>Total de Devoluções</Text>
         <View style={styles.statValueRow}>
-          <Text style={[styles.statValue, { color: D.gold }]}>38</Text>
-          <MaterialCommunityIcons name="trending-down" size={22} color={D.gold} />
-        </View>
-      </View>
-      <View style={styles.statRow}>
-        <Text style={styles.statLabel}>Saldo Líquido</Text>
-        <Text style={styles.netBalance}>-4 Itens</Text>
-        <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: "72%" }]} />
+          <Text style={[styles.statValue, { color: D.devolucao }]}>{devolucoes}</Text>
+          <MaterialCommunityIcons name="trending-down" size={22} color={D.devolucao} />
         </View>
       </View>
     </View>
@@ -1260,7 +1581,6 @@ const styles = StyleSheet.create({
   rightScrollContent: { padding: 16, gap: 16 },
   mainHeaderRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "flex-start",
     marginBottom: 18,
     flexWrap: "wrap",
@@ -1279,21 +1599,6 @@ const styles = StyleSheet.create({
     color: D.black,
     maxWidth: 320
   },
-  mainHeaderRight: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    gap: 10,
-    marginTop: 4
-  },
-  onlinePill: { flexDirection: "row", alignItems: "center", gap: 8 },
-  onlineDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: D.green
-  },
-  onlineText: { fontFamily: FONTS.semibold, fontSize: 12, color: "#333" },
   scanRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1402,7 +1707,8 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3
   },
   fakeSelectPlaceholder: { color: "#999" },
-  actionRow: { flexDirection: "row", gap: 12, marginBottom: 28 },
+  withdrawSection: { marginBottom: 28 },
+  actionRow: { flexDirection: "row", gap: 12 },
   actionRowHint: {
     flexDirection: "row",
     alignItems: "flex-start",
@@ -1422,38 +1728,98 @@ const styles = StyleSheet.create({
     color: "#555",
     lineHeight: 18
   },
-  devolucaoBanner: {
-    flexDirection: "row",
+  actionRowHintBelowWithdraw: { marginTop: 12, marginBottom: 0 },
+  devolucaoModalWrap: {
+    flex: 1,
+    justifyContent: "center",
     alignItems: "center",
-    flexWrap: "wrap",
-    gap: 12,
-    marginBottom: 14,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    backgroundColor: "rgba(232,185,35,0.14)",
+    padding: 24,
+    position: "relative"
+  },
+  devolucaoModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 0,
+    backgroundColor: "rgba(0,0,0,0.52)"
+  },
+  devolucaoModalCard: {
+    width: "100%",
+    maxWidth: 380,
+    zIndex: 2,
+    position: "relative",
+    backgroundColor: D.white,
+    borderRadius: 16,
+    padding: 22,
+    borderWidth: 1,
+    borderColor: D.borderLight,
+    ...Platform.select({
+      ios: {
+        shadowColor: "#000",
+        shadowOffset: { width: 0, height: 8 },
+        shadowOpacity: 0.2,
+        shadowRadius: 20
+      },
+      android: { elevation: 16 },
+      default: { boxShadow: "0 12px 40px rgba(0,0,0,0.22)" } as object
+    })
+  },
+  devolucaoModalTitle: {
+    fontFamily: FONTS.extrabold,
+    fontSize: 20,
+    color: D.black,
+    textAlign: "center",
+    marginBottom: 12
+  },
+  devolucaoModalProduct: {
+    fontFamily: FONTS.bold,
+    fontSize: 16,
+    color: D.black,
+    textAlign: "center",
+    marginBottom: 8
+  },
+  devolucaoModalSerial: { fontFamily: FONTS.semibold, fontSize: 14, color: "#666" },
+  devolucaoModalHint: {
+    fontFamily: FONTS.semibold,
+    fontSize: 14,
+    color: "#444",
+    textAlign: "center",
+    marginBottom: 12
+  },
+  devolucaoModalHintEm: { fontFamily: FONTS.extrabold, color: D.black },
+  devolucaoModalFoot: {
+    fontFamily: FONTS.semibold,
+    fontSize: 12,
+    color: "#777",
+    textAlign: "center",
+    lineHeight: 17,
+    marginBottom: 20
+  },
+  devolucaoModalActions: { flexDirection: "row", gap: 10 },
+  devolucaoModalBtnCancel: {
+    flex: 1,
+    paddingVertical: 14,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: D.gold
-  },
-  devolucaoBannerText: { flex: 1, minWidth: 180 },
-  devolucaoBannerTitle: {
-    fontFamily: FONTS.extrabold,
-    fontSize: 14,
-    color: D.black,
-    marginBottom: 4
-  },
-  devolucaoBannerSub: { fontFamily: FONTS.semibold, fontSize: 13, color: "#444", lineHeight: 18 },
-  devolucaoBannerEm: { fontFamily: FONTS.extrabold, color: D.black },
-  devolucaoBannerBtn: {
-    flexDirection: "row",
+    borderColor: D.borderLight,
     alignItems: "center",
-    gap: 6,
-    backgroundColor: D.gold,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 10
+    backgroundColor: "#f5f5f5"
   },
-  devolucaoBannerBtnText: { fontFamily: FONTS.bold, fontSize: 13, color: D.black },
+  devolucaoModalBtnCancelText: { fontFamily: FONTS.bold, fontSize: 14, color: "#444" },
+  devolucaoModalBtnOk: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: "center",
+    backgroundColor: D.devolucao
+  },
+  devolucaoModalBtnOkText: { fontFamily: FONTS.bold, fontSize: 14, color: D.white },
+  retiradaModalBtnConfirm: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: "center",
+    backgroundColor: D.black
+  },
+  retiradaModalBtnConfirmText: { fontFamily: FONTS.bold, fontSize: 14, color: D.white },
   iconBox: {
     width: 48,
     height: 48,
@@ -1470,6 +1836,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     alignItems: "center"
   },
+  withdrawBtnDisabled: {
+    opacity: 0.48,
+    ...Platform.select({
+      web: { cursor: "not-allowed" } as object,
+      default: {}
+    })
+  },
   actionBtnTitle: { fontFamily: FONTS.extrabold, fontSize: 16, color: D.white },
   actionBtnSub: { fontFamily: FONTS.semibold, fontSize: 11, color: "rgba(255,255,255,0.75)", marginTop: 2 },
   statsCard: {
@@ -1481,21 +1854,18 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.bold,
     fontSize: 13,
     color: "rgba(255,255,255,0.85)",
-    marginBottom: 16
+    marginBottom: 6
+  },
+  statsCardHint: {
+    fontFamily: FONTS.semibold,
+    fontSize: 11,
+    color: "rgba(255,255,255,0.5)",
+    marginBottom: 14
   },
   statRow: { marginBottom: 14 },
   statLabel: { fontFamily: FONTS.semibold, fontSize: 12, color: "rgba(255,255,255,0.65)", marginBottom: 4 },
   statValueRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   statValue: { fontFamily: FONTS.extrabold, fontSize: 32 },
-  netBalance: { fontFamily: FONTS.bold, fontSize: 16, color: D.white, marginTop: 4 },
-  progressTrack: {
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "rgba(255,255,255,0.15)",
-    marginTop: 8,
-    overflow: "hidden"
-  },
-  progressFill: { height: "100%", backgroundColor: D.gold, borderRadius: 3 },
   reportCard: {
     backgroundColor: D.white,
     borderRadius: 14,
@@ -1651,24 +2021,26 @@ const styles = StyleSheet.create({
   activityTop: { flexDirection: "row", gap: 12 },
   activityProduct: { fontFamily: FONTS.bold, fontSize: 15, color: D.black },
   activitySerial: { fontFamily: FONTS.semibold, fontSize: 12, color: "#666", marginTop: 4 },
-  activityVinculoLine: {
-    fontFamily: FONTS.semibold,
-    fontSize: 12,
-    color: "#444",
-    marginTop: 8,
-    paddingBottom: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: "#eee"
+  activityDevolverBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginTop: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: D.devolucao,
+    borderRadius: 8
   },
+  activityDevolverBtnText: { fontFamily: FONTS.bold, fontSize: 12, color: D.white },
   activityPeople: { marginTop: 8, gap: 4 },
   activityPeopleLine: { fontFamily: FONTS.semibold, fontSize: 12, color: "#444", marginTop: 2 },
   activityPeopleLabel: { fontFamily: FONTS.semibold, fontSize: 12, color: "#777" },
   activityPeopleName: { fontFamily: FONTS.bold, fontSize: 12, color: "#333" },
   activityTime: { fontFamily: FONTS.semibold, fontSize: 11, color: "#999" },
   badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6 },
-  badgeReturn: { backgroundColor: "rgba(46,125,50,0.12)" },
+  badgeReturn: { backgroundColor: "rgba(33,157,1,0.14)" },
   badgeWithdraw: { backgroundColor: "rgba(211,47,47,0.12)" },
   badgeText: { fontFamily: FONTS.bold, fontSize: 10, letterSpacing: 0.3 },
-  badgeTextReturn: { color: D.green },
+  badgeTextReturn: { color: D.devolucao },
   badgeTextWithdraw: { color: D.red }
 });
