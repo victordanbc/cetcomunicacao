@@ -39,3 +39,26 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# --- backup antes de formatar ---
+node_modules/
+dist/
+build/
+.next/
+.cache/
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.log
+*.pem
+*.key
+*.db
+*.sqlite
+*.sqlite3
+.idea/
+.DS_Store
+Thumbs.db
+.claude/settings.local.json
+**/.claude/settings.local.json
+.vscode/
